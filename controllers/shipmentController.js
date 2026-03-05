@@ -84,19 +84,23 @@ const processEvent = async (shipment, status, location) => {
     shipment.id,
   ]);
 
-  /* =========================
-     ETA PREDICTION
-  ========================= */
+  /* ETA Prediction */
 
-  const etaResponse = await axios.post("http://localhost:8000/predict-eta", {
-    distance: 200,
-    speed: 60,
-    traffic: 3,
-    weather: 2,
-    reliability: 7,
-  });
+  let etaHours = 24;
 
-  const etaHours = etaResponse.data.predicted_eta_hours;
+  try {
+    const etaResponse = await axios.post("http://localhost:8000/predict-eta", {
+      distance: 200,
+      speed: 60,
+      traffic: 3,
+      weather: 2,
+      reliability: 7,
+    });
+
+    etaHours = etaResponse.data.predicted_eta_hours;
+  } catch (error) {
+    console.log("ETA service unavailable, fallback ETA used");
+  }
 
   const etaDate = new Date();
   etaDate.setHours(etaDate.getHours() + etaHours);
@@ -106,31 +110,33 @@ const processEvent = async (shipment, status, location) => {
     shipment.id,
   ]);
 
-  /* =========================
-     DELAY PREDICTION
-  ========================= */
+  /* Delay Prediction */
 
-  const delayResponse = await axios.post(
-    "http://localhost:8000/predict-delay",
-    {
-      distance: 200,
-      speed: 60,
-      traffic: 3,
-      weather: 2,
-      reliability: 7,
-    },
-  );
+  let delayProbability = 30;
 
-  const delayProbability = delayResponse.data.delay_probability_percent;
+  try {
+    const delayResponse = await axios.post(
+      "http://localhost:8000/predict-delay",
+      {
+        distance: 200,
+        speed: 60,
+        traffic: 3,
+        weather: 2,
+        reliability: 7,
+      },
+    );
+
+    delayProbability = delayResponse.data.delay_probability_percent;
+  } catch (error) {
+    console.log("Delay service unavailable, fallback delay used");
+  }
 
   await pool.query("UPDATE shipments SET delay_probability=$1 WHERE id=$2", [
     delayProbability,
     shipment.id,
   ]);
 
-  /* =========================
-     RISK SCORE
-  ========================= */
+  /* Risk Score */
 
   const riskScore = calculateRiskScore(delayProbability, 3, 2, 7);
 
@@ -142,9 +148,7 @@ const processEvent = async (shipment, status, location) => {
     [riskScore, isHighRisk, shipment.id],
   );
 
-  /* ============================================
-     AUTO REROUTING ENGINE
-  ============================================ */
+  /* Auto rerouting */
 
   if (isSevereDelay) {
     try {
@@ -157,8 +161,6 @@ const processEvent = async (shipment, status, location) => {
       const newRoute = await getAlternativeRoute(origin, destination);
 
       if (newRoute) {
-        console.log("Alternative route:", newRoute);
-
         await pool.query(
           `INSERT INTO notifications
            (shipment_id,type,message,language)
@@ -176,9 +178,7 @@ const processEvent = async (shipment, status, location) => {
     }
   }
 
-  /* ============================================
-     HIGH RISK NOTIFICATION
-  ============================================ */
+  /* High Risk Notification */
 
   if (isHighRisk) {
     const message = getMessageTemplate(
@@ -202,7 +202,6 @@ const processEvent = async (shipment, status, location) => {
       );
 
       await sendSMS("+919999999999", message);
-
       await sendWhatsApp("+919999999999", message);
     } catch (error) {
       console.log("Notification error:", error.message);
@@ -255,7 +254,7 @@ exports.createShipment = async (req, res) => {
     res.status(201).json({
       message: "Shipment Created Successfully",
       tracking_id,
-      trackingLink: `http://localhost:5000/track/${secure_token}`,
+      trackingLink: `https://smart-shipment-tracking.onrender.com/api/track/${secure_token}`,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -290,76 +289,23 @@ exports.trackShipment = async (req, res) => {
 };
 
 /* ============================================
-   ADD SHIPMENT EVENT
+   GET ALL SHIPMENTS (ADMIN)
 ============================================ */
 
-exports.addShipmentEvent = async (req, res) => {
+exports.getShipments = async (req, res) => {
   try {
-    const { tracking_id, event_type, location } = req.body;
-
-    const result = await pool.query(
-      "SELECT * FROM shipments WHERE tracking_id=$1",
-      [tracking_id],
+    const shipments = await pool.query(
+      "SELECT * FROM shipments ORDER BY id DESC",
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Shipment Not Found",
-      });
-    }
-
-    const shipment = result.rows[0];
-
-    const output = await processEvent(shipment, event_type, location);
-
     res.status(200).json({
-      message: "Event Processed Successfully",
-      output,
+      shipments: shipments.rows,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
+    console.error("Get Shipments Error:", error);
 
-/* ============================================
-   CARRIER EVENT UPDATE
-============================================ */
-
-exports.carrierEventUpdate = async (req, res) => {
-  try {
-    const { tracking_id, carrier_status, location } = req.body;
-
-    if (!tracking_id || !carrier_status) {
-      return res.status(400).json({
-        message: "tracking_id and carrier_status are required",
-      });
-    }
-
-    const result = await pool.query(
-      "SELECT * FROM shipments WHERE tracking_id=$1",
-      [tracking_id],
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Shipment Not Found",
-      });
-    }
-
-    const shipment = result.rows[0];
-
-    const unifiedStatus = normalizeStatus(carrier_status);
-
-    const output = await processEvent(shipment, unifiedStatus, location);
-
-    res.status(200).json({
-      message: "Carrier Event Processed Successfully",
-      status: unifiedStatus,
-      output,
+    res.status(500).json({
+      error: "Failed to fetch shipments",
     });
-  } catch (error) {
-    console.error("Carrier Event Error:", error);
-
-    res.status(500).json({ error: error.message });
   }
 };
