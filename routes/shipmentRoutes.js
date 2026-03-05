@@ -24,6 +24,8 @@ router.get("/shipments", auth, shipmentController.getShipments);
 ============================================ */
 router.post("/add-event", auth, shipmentController.addShipmentEvent);
 
+router.get("/shipments", shipmentController.getShipments);
+
 /* ============================================
    CARRIER EVENT UPDATE
 ============================================ */

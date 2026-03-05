@@ -8,68 +8,69 @@ const pool = require("./config/db");
 const shipmentRoutes = require("./routes/shipmentRoutes");
 const iotRoutes = require("./routes/iotRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
-const authRoutes = require("./routes/authRoutes"); // ✅ AUTH ROUTES ADDED
+const authRoutes = require("./routes/authRoutes");
 
 const { initSocket } = require("./config/socket");
 
 const app = express();
 
 /* ==============================
-   🔹 Middleware
+   🔹 MIDDLEWARE
 ============================== */
 
 app.use(cors());
 app.use(express.json());
 
 /* ==============================
-   🔹 Routes
+   🔹 ROUTES
 ============================== */
 
-// 🔐 Authentication APIs
+// Auth APIs
 app.use("/api/auth", authRoutes);
 
 // Shipment APIs
 app.use("/api", shipmentRoutes);
 
-// IoT Sensor APIs
+// IoT APIs
 app.use("/api/iot", iotRoutes);
 
 // Analytics APIs
 app.use("/api/analytics", analyticsRoutes);
 
 /* ==============================
-   🔹 Test Routes
+   🔹 TEST ROUTES
 ============================== */
 
 // Server test
 app.get("/", (req, res) => {
-  res.send("Backend Server Running 🚀");
+  res.send("🚀 Backend Server Running");
 });
 
 // Database test
 app.get("/test-db", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM shipments;");
+    const result = await pool.query("SELECT * FROM shipments");
     res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: "Database error" });
   }
 });
 
 /* ==============================
-   🔹 Create HTTP Server
+   🔹 HTTP SERVER
 ============================== */
 
 const server = http.createServer(app);
 
 /* ==============================
-   🔹 Initialize Socket
+   🔹 SOCKET.IO INIT
 ============================== */
 
 initSocket(server);
 
 /* ==============================
-   🔹 Start Server
+   🔹 START SERVER
 ============================== */
 
 const PORT = process.env.PORT || 5000;
