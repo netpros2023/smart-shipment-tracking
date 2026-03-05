@@ -17,14 +17,12 @@ router.get("/track/:token", shipmentController.trackShipment);
 /* ============================================
    GET ALL SHIPMENTS (Admin Dashboard)
 ============================================ */
-router.get("/shipments", auth, shipmentController.getShipments);
+router.get("/shipments", shipmentController.getShipments);
 
 /* ============================================
    ADD SHIPMENT EVENT
 ============================================ */
 router.post("/add-event", auth, shipmentController.addShipmentEvent);
-
-router.get("/shipments", shipmentController.getShipments);
 
 /* ============================================
    CARRIER EVENT UPDATE
