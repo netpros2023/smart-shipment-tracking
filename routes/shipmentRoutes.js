@@ -2,31 +2,21 @@ const express = require("express");
 const router = express.Router();
 
 const shipmentController = require("../controllers/shipmentController");
-const auth = require("../middleware/authMiddleware"); // JWT AUTH
+const auth = require("../middleware/authMiddleware");
 
-/* ============================================
-   CREATE SHIPMENT (Protected)
-============================================ */
+/* CREATE SHIPMENT */
 router.post("/create-shipment", auth, shipmentController.createShipment);
 
-/* ============================================
-   TRACK SHIPMENT (Public)
-============================================ */
+/* TRACK SHIPMENT */
 router.get("/track/:token", shipmentController.trackShipment);
 
-/* ============================================
-   GET ALL SHIPMENTS (Admin Dashboard)
-============================================ */
+/* GET ALL SHIPMENTS */
 router.get("/shipments", shipmentController.getShipments);
 
-/* ============================================
-   ADD SHIPMENT EVENT
-============================================ */
+/* ADD EVENT */
 router.post("/add-event", auth, shipmentController.addShipmentEvent);
 
-/* ============================================
-   CARRIER EVENT UPDATE
-============================================ */
+/* CARRIER UPDATE */
 router.post("/event-update", auth, shipmentController.carrierEventUpdate);
 
 module.exports = router;
