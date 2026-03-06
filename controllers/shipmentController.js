@@ -27,31 +27,7 @@ const normalizeStatus = (carrierStatus) => {
 };
 
 /* ============================================
-   MULTI LANGUAGE MESSAGE ENGINE
-============================================ */
-
-const getMessageTemplate = (language, status, riskScore) => {
-  const templates = {
-    EN: `Your shipment is currently "${status}". Risk Score: ${riskScore}.`,
-    TA: `உங்கள் பார்சல் தற்போது "${status}" நிலையில் உள்ளது. அபாய மதிப்பெண்: ${riskScore}.`,
-    HI: `आपका पार्सल अभी "${status}" स्थिति में है। जोखिम स्कोर: ${riskScore}.`,
-    TE: `మీ పార్సెల్ ప్రస్తుతం "${status}" స్థితిలో ఉంది. ప్రమాద స్కోర్: ${riskScore}.`,
-    KN: `ನಿಮ್ಮ ಪಾರ್ಸೆಲ್ ಈಗ "${status}" ಸ್ಥಿತಿಯಲ್ಲಿ ಇದೆ. ಅಪಾಯ ಅಂಕೆ: ${riskScore}.`,
-    ML: `നിങ്ങളുടെ പാർസൽ ഇപ്പോൾ "${status}" നിലയിലാണ്. റിസ്ക് സ്കോർ: ${riskScore}.`,
-    MR: `तुमचा पार्सल सध्या "${status}" स्थितीत आहे. जोखीम स्कोर: ${riskScore}.`,
-    BN: `আপনার পার্সেল বর্তমানে "${status}" অবস্থায় রয়েছে। ঝুঁকি স্কোর: ${riskScore}.`,
-    GU: `તમારું પાર્સલ હાલમાં "${status}" સ્થિતિમાં છે. જોખમ સ્કોર: ${riskScore}.`,
-    PA: `ਤੁਹਾਡਾ ਪਾਰਸਲ ਇਸ ਵੇਲੇ "${status}" ਸਥਿਤੀ ਵਿੱਚ ਹੈ। ਜੋਖਮ ਸਕੋਰ: ${riskScore}.`,
-    OR: `ଆପଣଙ୍କର ପାର୍ସେଲ୍ ବର୍ତ୍ତମାନ "${status}" ଅବସ୍ଥାରେ ଅଛି। ଝୁମ୍କି ସ୍କୋର: ${riskScore}.`,
-    AS: `আপোনাৰ পাৰ্চেল এতিয়া "${status}" অৱস্থাত আছে। ঝুঁকি স্কোৰ: ${riskScore}.`,
-    UR: `آپ کا پارسل اس وقت "${status}" حالت میں ہے۔ رسک اسکور: ${riskScore}.`,
-  };
-
-  return templates[language] || templates["EN"];
-};
-
-/* ============================================
-   RISK SCORING ENGINE
+   RISK SCORE ENGINE
 ============================================ */
 
 const calculateRiskScore = (
@@ -99,7 +75,7 @@ const processEvent = async (shipment, status, location) => {
 
     etaHours = etaResponse.data.predicted_eta_hours;
   } catch (error) {
-    console.log("ETA service unavailable, fallback ETA used");
+    console.log("ETA service unavailable");
   }
 
   const etaDate = new Date();
@@ -110,7 +86,7 @@ const processEvent = async (shipment, status, location) => {
     shipment.id,
   ]);
 
-  /* Delay Prediction */
+  /* Delay prediction */
 
   let delayProbability = 30;
 
@@ -128,7 +104,7 @@ const processEvent = async (shipment, status, location) => {
 
     delayProbability = delayResponse.data.delay_probability_percent;
   } catch (error) {
-    console.log("Delay service unavailable, fallback delay used");
+    console.log("Delay prediction fallback used");
   }
 
   await pool.query("UPDATE shipments SET delay_probability=$1 WHERE id=$2", [
@@ -136,81 +112,34 @@ const processEvent = async (shipment, status, location) => {
     shipment.id,
   ]);
 
-  /* Risk Score */
-
   const riskScore = calculateRiskScore(delayProbability, 3, 2, 7);
 
   const isHighRisk = riskScore >= 70;
-  const isSevereDelay = delayProbability >= 80;
 
   await pool.query(
     "UPDATE shipments SET risk_score=$1,is_high_risk=$2 WHERE id=$3",
     [riskScore, isHighRisk, shipment.id],
   );
 
-  /* Auto rerouting */
-
-  if (isSevereDelay) {
-    try {
-      const origin =
-        shipment.current_latitude + "," + shipment.current_longitude;
-
-      const destination =
-        shipment.destination_latitude + "," + shipment.destination_longitude;
-
-      const newRoute = await getAlternativeRoute(origin, destination);
-
-      if (newRoute) {
-        await pool.query(
-          `INSERT INTO notifications
-           (shipment_id,type,message,language)
-           VALUES ($1,$2,$3,$4)`,
-          [
-            shipment.id,
-            "ROUTE_CHANGE",
-            `Alternative route suggested: ${newRoute.summary}`,
-            shipment.language || "EN",
-          ],
-        );
-      }
-    } catch (error) {
-      console.log("Reroute error:", error.message);
-    }
-  }
-
-  /* High Risk Notification */
-
   if (isHighRisk) {
-    const message = getMessageTemplate(
-      shipment.language || "EN",
-      status,
-      riskScore,
-    );
+    const message = `Shipment ${shipment.tracking_id} is high risk (${riskScore})`;
 
     await pool.query(
       `INSERT INTO notifications
-       (shipment_id,type,message,language)
-       VALUES ($1,$2,$3,$4)`,
-      [shipment.id, "HIGH_RISK_ALERT", message, shipment.language || "EN"],
+       (shipment_id,type,message)
+       VALUES ($1,$2,$3)`,
+      [shipment.id, "HIGH_RISK_ALERT", message],
     );
 
     try {
-      await sendEmail(
-        shipment.customer_email,
-        "High Risk Shipment Alert",
-        message,
-      );
-
-      await sendSMS("+919999999999", message);
-      await sendWhatsApp("+919999999999", message);
-    } catch (error) {
-      console.log("Notification error:", error.message);
+      await sendEmail(shipment.customer_email, "Shipment Alert", message);
+    } catch (err) {
+      console.log("Email failed");
     }
 
     getIO().emit("highRiskShipment", {
       tracking_id: shipment.tracking_id,
       riskScore,
-      message,
     });
   }
 
@@ -218,7 +147,6 @@ const processEvent = async (shipment, status, location) => {
     etaDate,
     delayProbability,
     riskScore,
-    isHighRisk,
   };
 };
 
@@ -252,7 +180,7 @@ exports.createShipment = async (req, res) => {
     );
 
     res.status(201).json({
-      message: "Shipment Created Successfully",
+      message: "Shipment Created",
       tracking_id,
       trackingLink: `https://smart-shipment-tracking.onrender.com/api/track/${secure_token}`,
     });
@@ -276,7 +204,7 @@ exports.trackShipment = async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        message: "Invalid Tracking Link",
+        message: "Invalid tracking link",
       });
     }
 
@@ -289,7 +217,7 @@ exports.trackShipment = async (req, res) => {
 };
 
 /* ============================================
-   GET ALL SHIPMENTS (ADMIN)
+   GET ALL SHIPMENTS
 ============================================ */
 
 exports.getShipments = async (req, res) => {
@@ -302,10 +230,74 @@ exports.getShipments = async (req, res) => {
       shipments: shipments.rows,
     });
   } catch (error) {
-    console.error("Get Shipments Error:", error);
-
     res.status(500).json({
       error: "Failed to fetch shipments",
     });
+  }
+};
+
+/* ============================================
+   ADD EVENT
+============================================ */
+
+exports.addShipmentEvent = async (req, res) => {
+  try {
+    const { tracking_id, event_type, location } = req.body;
+
+    const result = await pool.query(
+      "SELECT * FROM shipments WHERE tracking_id=$1",
+      [tracking_id],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Shipment not found",
+      });
+    }
+
+    const shipment = result.rows[0];
+
+    const output = await processEvent(shipment, event_type, location);
+
+    res.json({
+      message: "Event added",
+      output,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/* ============================================
+   CARRIER EVENT UPDATE
+============================================ */
+
+exports.carrierEventUpdate = async (req, res) => {
+  try {
+    const { tracking_id, carrier_status, location } = req.body;
+
+    const result = await pool.query(
+      "SELECT * FROM shipments WHERE tracking_id=$1",
+      [tracking_id],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Shipment not found",
+      });
+    }
+
+    const shipment = result.rows[0];
+
+    const status = normalizeStatus(carrier_status);
+
+    const output = await processEvent(shipment, status, location);
+
+    res.json({
+      message: "Carrier update processed",
+      output,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 };
