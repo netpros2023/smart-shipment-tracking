@@ -4,14 +4,8 @@ const router = express.Router();
 
 const analytics = require("../controllers/analyticsController");
 
-router.get("/on-time", analytics.getOnTimePercentage);
-
-router.get("/eta-accuracy", analytics.getEtaAccuracy);
-
+router.get("/summary", analytics.getAnalyticsSummary);
 router.get("/carrier-performance", analytics.getCarrierPerformance);
-
-router.get("/delay-heatmap", analytics.getDelayHeatmap);
-
-router.get("/risk-distribution", analytics.getRiskDistribution);
+router.get("/delay", analytics.getDelayAnalysis);
 
 module.exports = router;

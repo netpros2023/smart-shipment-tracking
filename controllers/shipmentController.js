@@ -1,7 +1,6 @@
 const pool = require("../config/db");
 const { v4: uuidv4 } = require("uuid");
 const { getIO } = require("../config/socket");
-const axios = require("axios");
 
 const {
   sendEmail,
@@ -9,295 +8,322 @@ const {
   sendWhatsApp,
 } = require("../services/notificationService");
 
-const { getAlternativeRoute } = require("../services/rerouteService");
+const calculateRisk = require("../utils/riskCalculator");
 
-/* ============================================
-   STATUS NORMALIZATION ENGINE
-============================================ */
+/* =========================================
+MULTI LANGUAGE MESSAGE ENGINE
+========================================= */
 
-const normalizeStatus = (carrierStatus) => {
-  const statusMap = {
-    DLVD: "Delivered",
-    ODF: "Out for Delivery",
-    INT: "In Transit",
-    PKD: "Picked Up",
+const getMessage = (language, type, trackingId, riskScore) => {
+  const lang = (language || "EN").toUpperCase();
+
+  const messages = {
+    EN: {
+      HIGH_RISK: `Shipment ${trackingId} is high risk (${riskScore})`,
+      CREATED: `Your shipment ${trackingId} has been created`,
+    },
   };
 
-  return statusMap[carrierStatus] || "In Transit";
+  return messages[lang]?.[type] || messages["EN"][type];
 };
 
-/* ============================================
-   RISK SCORE ENGINE
-============================================ */
-
-const calculateRiskScore = (
-  delayProbability,
-  traffic,
-  weather,
-  reliability,
-) => {
-  let score =
-    delayProbability * 0.5 + traffic * 5 + weather * 5 + (10 - reliability) * 4;
-
-  if (score > 100) score = 100;
-
-  return Math.round(score);
-};
-
-/* ============================================
-   CENTRAL EVENT PROCESSING ENGINE
-============================================ */
-
-const processEvent = async (shipment, status, location) => {
-  await pool.query(
-    `INSERT INTO shipment_events (shipment_id,event_type,location)
-     VALUES ($1,$2,$3)`,
-    [shipment.id, status, location || "Unknown"],
-  );
-
-  await pool.query("UPDATE shipments SET status=$1 WHERE id=$2", [
-    status,
-    shipment.id,
-  ]);
-
-  /* ETA Prediction */
-
-  let etaHours = 24;
-
-  try {
-    const etaResponse = await axios.post("http://localhost:8000/predict-eta", {
-      distance: 200,
-      speed: 60,
-      traffic: 3,
-      weather: 2,
-      reliability: 7,
-    });
-
-    etaHours = etaResponse.data.predicted_eta_hours;
-  } catch (error) {
-    console.log("ETA service unavailable");
-  }
-
-  const etaDate = new Date();
-  etaDate.setHours(etaDate.getHours() + etaHours);
-
-  await pool.query("UPDATE shipments SET eta=$1 WHERE id=$2", [
-    etaDate,
-    shipment.id,
-  ]);
-
-  /* Delay prediction */
-
-  let delayProbability = 30;
-
-  try {
-    const delayResponse = await axios.post(
-      "http://localhost:8000/predict-delay",
-      {
-        distance: 200,
-        speed: 60,
-        traffic: 3,
-        weather: 2,
-        reliability: 7,
-      },
-    );
-
-    delayProbability = delayResponse.data.delay_probability_percent;
-  } catch (error) {
-    console.log("Delay prediction fallback used");
-  }
-
-  await pool.query("UPDATE shipments SET delay_probability=$1 WHERE id=$2", [
-    delayProbability,
-    shipment.id,
-  ]);
-
-  const riskScore = calculateRiskScore(delayProbability, 3, 2, 7);
-
-  const isHighRisk = riskScore >= 70;
-
-  await pool.query(
-    "UPDATE shipments SET risk_score=$1,is_high_risk=$2 WHERE id=$3",
-    [riskScore, isHighRisk, shipment.id],
-  );
-
-  if (isHighRisk) {
-    const message = `Shipment ${shipment.tracking_id} is high risk (${riskScore})`;
-
-    await pool.query(
-      `INSERT INTO notifications
-       (shipment_id,type,message)
-       VALUES ($1,$2,$3)`,
-      [shipment.id, "HIGH_RISK_ALERT", message],
-    );
-
-    try {
-      await sendEmail(shipment.customer_email, "Shipment Alert", message);
-    } catch (err) {
-      console.log("Email failed");
-    }
-
-    getIO().emit("highRiskShipment", {
-      tracking_id: shipment.tracking_id,
-      riskScore,
-    });
-  }
-
-  return {
-    etaDate,
-    delayProbability,
-    riskScore,
-  };
-};
-
-/* ============================================
-   CREATE SHIPMENT
-============================================ */
+/* =========================================
+CREATE SHIPMENT
+========================================= */
 
 exports.createShipment = async (req, res) => {
   try {
-    const { customer_name, customer_email, language } = req.body;
+    const { 
+      customer_name, customer_email, language, sender, receiver, carrier, 
+      weight, pickup_address, delivery_address, description,
+      pickup_lat, pickup_lng, delivery_lat, delivery_lng,
+      package_type, priority, shipping_cost, sms_notif, email_notif,
+      sender_phone, receiver_phone
+    } = req.body;
 
     const tracking_id = "TRK-" + uuidv4().slice(0, 8);
     const secure_token = uuidv4();
 
     const token_expiry = new Date();
     token_expiry.setHours(token_expiry.getHours() + 48);
+    
+    // Dynamic ETA based on Priority
+    const eta_date = new Date();
+    if (priority === 'Urgent') {
+      eta_date.setDate(eta_date.getDate() + 1);
+    } else if (priority === 'Express') {
+      eta_date.setDate(eta_date.getDate() + 2);
+    } else {
+      eta_date.setDate(eta_date.getDate() + 4);
+    }
+
+    const lang = (language || "EN").toUpperCase();
 
     await pool.query(
       `INSERT INTO shipments
-       (tracking_id,customer_name,customer_email,language,status,secure_token,token_expiry)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      (tracking_id, customer_name, customer_email, language, status, secure_token, token_expiry, 
+       sender, receiver, carrier, weight, pickup_address, delivery_address, description, eta_date,
+       pickup_lat, pickup_lng, delivery_lat, delivery_lng, package_type, priority, shipping_cost, sms_notif, email_notif,
+       sender_phone, receiver_phone)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
       [
         tracking_id,
-        customer_name,
-        customer_email,
-        language || "EN",
-        "Created",
+        customer_name || receiver,
+        customer_email || null,
+        lang,
+        "Shipment Created",
         secure_token,
         token_expiry,
+        sender,
+        receiver,
+        carrier,
+        weight || null,
+        pickup_address,
+        delivery_address,
+        description,
+        eta_date,
+        pickup_lat || null,
+        pickup_lng || null,
+        delivery_lat || null,
+        delivery_lng || null,
+        package_type || 'Standard',
+        priority || 'Standard',
+        shipping_cost || 0,
+        sms_notif || false,
+        email_notif || false,
+        sender_phone || null,
+        receiver_phone || null
       ],
     );
 
+    const message = getMessage(lang, "CREATED", tracking_id);
+
+    // Insert notification
+    await pool.query(
+      "INSERT INTO notifications (message, shipment_id, type) VALUES ($1, $2, $3)",
+      [message, tracking_id, 'info']
+    );
+
     res.status(201).json({
-      message: "Shipment Created",
+      message,
       tracking_id,
-      trackingLink: `https://smart-shipment-tracking.onrender.com/api/track/${secure_token}`,
+      tracking_link: `http://localhost:3000/track/${secure_token}`,
     });
   } catch (error) {
+    console.error("Create Shipment Error:", error);
     res.status(500).json({ error: error.message });
   }
 };
 
-/* ============================================
-   TRACK SHIPMENT
-============================================ */
+/* =========================================
+TRACK SHIPMENT
+========================================= */
 
 exports.trackShipment = async (req, res) => {
   try {
     const { token } = req.params;
 
     const result = await pool.query(
-      "SELECT * FROM shipments WHERE secure_token=$1",
+      `SELECT 
+        tracking_id,
+        customer_name,
+        status,
+        language,
+        created_at,
+        current_latitude,
+        current_longitude,
+        pickup_lat,
+        pickup_lng,
+        delivery_lat,
+        delivery_lng,
+        sender,
+        receiver,
+        carrier,
+        weight,
+        pickup_address,
+        delivery_address,
+        description,
+        eta_date,
+        sender_phone,
+        receiver_phone
+       FROM shipments
+       WHERE tracking_id = $1
+       OR secure_token = $1`,
       [token],
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        message: "Invalid tracking link",
+        message: "Shipment not found",
       });
     }
 
-    res.status(200).json({
-      shipment: result.rows[0],
-    });
+    res.json(result.rows[0]);
   } catch (error) {
+    console.error("Track Shipment Error:", error);
     res.status(500).json({ error: error.message });
   }
 };
 
-/* ============================================
-   GET ALL SHIPMENTS
-============================================ */
+/* =========================================
+GET ALL SHIPMENTS
+========================================= */
 
 exports.getShipments = async (req, res) => {
   try {
-    const shipments = await pool.query(
-      "SELECT * FROM shipments ORDER BY id DESC",
-    );
+    const result = await pool.query(`
+      SELECT
+      id,
+      tracking_id AS "trackingId",
+      customer_name AS "customerName",
+      customer_email AS "customerEmail",
+      language,
+      status,
+      created_at AS "createdAt",
+      sender,
+      receiver,
+      carrier,
+      weight,
+      pickup_address AS "pickupAddress",
+      delivery_address AS "deliveryAddress",
+      description,
+      eta_date AS "etaDate",
+      sender_phone AS "senderPhone",
+      receiver_phone AS "receiverPhone"
+      FROM shipments
+      ORDER BY created_at DESC
+    `);
 
-    res.status(200).json({
-      shipments: shipments.rows,
+    res.json({
+      shipments: result.rows,
     });
   } catch (error) {
+    console.error("Shipment fetch error:", error);
     res.status(500).json({
       error: "Failed to fetch shipments",
     });
   }
 };
 
-/* ============================================
-   ADD EVENT
-============================================ */
+/* =========================================
+ADD EVENT
+========================================= */
 
 exports.addShipmentEvent = async (req, res) => {
   try {
-    const { tracking_id, event_type, location } = req.body;
+    const { tracking_id, status, location } = req.body;
 
-    const result = await pool.query(
+    const shipment = await pool.query(
       "SELECT * FROM shipments WHERE tracking_id=$1",
       [tracking_id],
     );
 
-    if (result.rows.length === 0) {
+    if (shipment.rows.length === 0) {
       return res.status(404).json({
         message: "Shipment not found",
       });
     }
 
-    const shipment = result.rows[0];
+    const shipmentData = shipment.rows[0];
 
-    const output = await processEvent(shipment, event_type, location);
+    const event = await pool.query(
+      `INSERT INTO shipment_events
+      (shipment_id,status,location)
+      VALUES ($1,$2,$3)
+      RETURNING *`,
+      [shipmentData.id, status, location],
+    );
 
     res.json({
       message: "Event added",
-      output,
+      event: event.rows[0],
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Add Event Error:", error);
+    res.status(500).json({
+      error: error.message,
+    });
   }
 };
 
-/* ============================================
-   CARRIER EVENT UPDATE
-============================================ */
+/* =========================================
+GET SHIPMENT EVENTS
+========================================= */
 
-exports.carrierEventUpdate = async (req, res) => {
+exports.getShipmentEvents = async (req, res) => {
   try {
-    const { tracking_id, carrier_status, location } = req.body;
+    const { tracking_id } = req.params;
 
     const result = await pool.query(
-      "SELECT * FROM shipments WHERE tracking_id=$1",
+      `
+      SELECT 
+      e.id,
+      s.tracking_id,
+      e.status,
+      e.location,
+      e.created_at
+      FROM shipment_events e
+      JOIN shipments s ON e.shipment_id = s.id
+      WHERE s.tracking_id = $1
+      ORDER BY e.created_at ASC
+      `,
       [tracking_id],
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Shipment not found",
-      });
-    }
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Get Events Error:", error);
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+};
 
-    const shipment = result.rows[0];
+/* =========================================
+CARRIER EVENT UPDATE
+========================================= */
 
-    const status = normalizeStatus(carrier_status);
+exports.carrierEventUpdate = async (req, res) => {
+  try {
+    const { tracking_id, carrier_status } = req.body;
 
-    const output = await processEvent(shipment, status, location);
+    await pool.query("UPDATE shipments SET status=$1 WHERE tracking_id=$2", [
+      carrier_status,
+      tracking_id,
+    ]);
 
     res.json({
       message: "Carrier update processed",
-      output,
+      status: carrier_status,
     });
   } catch (error) {
+    console.error("Carrier Update Error:", error);
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+};
+
+/* =========================================
+GET SHIPMENT LOCATION (POLLING)
+========================================= */
+
+exports.getShipmentLocation = async (req, res) => {
+  try {
+    const { tracking_id } = req.params;
+
+    const result = await pool.query(
+      `SELECT current_latitude, current_longitude, pickup_lat, pickup_lng, delivery_lat, delivery_lng, status FROM shipments WHERE tracking_id = $1`,
+      [tracking_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Shipment not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Get Location Error:", error);
     res.status(500).json({ error: error.message });
   }
 };
